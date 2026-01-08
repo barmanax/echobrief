@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import axios from "axios";
 import SVG from "react-inlinesvg";
-import "./App.css";
 import {
   FaDoorOpen,
   FaExclamationTriangle,
@@ -11,65 +10,26 @@ import {
   FaPlay,
   FaPause,
 } from "react-icons/fa";
-
-const Timeline = ({ duration, events, currentTime, onSeek }) => {
-  if (duration === 0) return null;
-
-  const handleSeek = (e) => {
-    const timeline = e.currentTarget;
-    const rect = timeline.getBoundingClientRect();
-    const clickX = e.clientX - rect.left;
-    const seekRatio = clickX / rect.width;
-    onSeek(seekRatio * duration);
-  };
-
-  return (
-    <div className="timeline-container-visual" onClick={handleSeek}>
-      <div className="timeline-track">
-        {events.map((event) => (
-          <div
-            key={event.timestamp_sec + event.event_summary}
-            className={`event-marker urgency-${event.urgency}`}
-            style={{ left: `${(event.timestamp_sec / duration) * 100}%` }}
-            title={`${event.time_raw} - ${event.event_summary}`}
-          />
-        ))}
-        <div
-          className="timeline-handle"
-          style={{ left: `${(currentTime / duration) * 100}%` }}
-        />
-      </div>
-    </div>
-  );
-};
+import "./App.css";
 
 function App() {
+  const [audioFile, setAudioFile] = useState(null);
+  const [audioSrc, setAudioSrc] = useState(null);
+  const [floorplanSvg, setFloorplanSvg] = useState("");
+
   const [events, setEvents] = useState([]);
   const [incidentSummary, setIncidentSummary] = useState("");
   const [officerContributions, setOfficerContributions] = useState({});
-  const [roomCoords, setRoomCoords] = useState({});
   const [selectedEvent, setSelectedEvent] = useState(null);
+  const [roomCoords, setRoomCoords] = useState({});
 
-  const [audioFile, setAudioFile] = useState(null);
-  const [floorplanSvg, setFloorplanSvg] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState("");
-
-  const audioRef = useRef(null);
-  const [audioSrc, setAudioSrc] = useState(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
 
+  const audioRef = useRef(null);
   const visualPanelRef = useRef(null);
-
-  const handleAudioChange = (e) => {
-    const file = e.target.files[0];
-    setAudioFile(file);
-
-    if (audioSrc) URL.revokeObjectURL(audioSrc);
-    setAudioSrc(URL.createObjectURL(file));
-  };
 
   const ROOM_TIMESTAMPS = {
     entrance: 31,
@@ -82,16 +42,138 @@ function App() {
     "bedroom-3": 95,
   };
 
+  const handleAudioChange = (e) => {
+    const file = e.target.files[0];
+    setAudioFile(file);
+    if (audioSrc) URL.revokeObjectURL(audioSrc);
+    setAudioSrc(URL.createObjectURL(file));
+  };
+
   const handleFloorplanChange = (e) => {
     const file = e.target.files[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (event) => setFloorplanSvg(event.target.result);
-      reader.readAsText(file);
+    const reader = new FileReader();
+    reader.onload = (evt) => setFloorplanSvg(evt.target.result);
+    reader.readAsText(file);
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!audioFile || !floorplanSvg) {
+      alert("Please upload both files.");
+      return;
+    }
+
+    setIsLoading(true);
+    setEvents([]);
+    setIncidentSummary("");
+    setOfficerContributions({});
+    setSelectedEvent(null);
+
+    const formData = new FormData();
+    formData.append("audio_file", audioFile);
+
+    try {
+      const res = await axios.post(
+        "http://localhost:8000/api/process-incident/",
+        formData
+      );
+      setEvents(res.data.events);
+      setIncidentSummary(res.data.incidentSummary);
+      setOfficerContributions(res.data.officerContributions);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsLoading(false);
     }
   };
 
-  // (More App.js continues — upload next screenshots and I’ll keep appending cleanly.)
+  const handlePlayPause = () => {
+    if (!audioRef.current) return;
+    isPlaying ? audioRef.current.pause() : audioRef.current.play();
+  };
+
+  const handleSeek = (time) => {
+    if (!audioRef.current) return;
+    audioRef.current.currentTime = time;
+    setCurrentTime(time);
+  };
+
+  const handleIconClick = (event) => {
+    setSelectedEvent(event);
+    const seekTime = ROOM_TIMESTAMPS[event.location] || 0;
+    handleSeek(seekTime);
+  };
+
+  const significantRoomEvents = useMemo(() => {
+    const urgencyOrder = { high: 3, medium: 2, low: 1 };
+    const map = {};
+    for (const e of events) {
+      if (!e.location) continue;
+      if (
+        !map[e.location] ||
+        urgencyOrder[e.urgency] > urgencyOrder[map[e.location].urgency]
+      ) {
+        map[e.location] = e;
+      }
+    }
+    return Object.values(map);
+  }, [events]);
+
+  const getIconForEvent = (event) => {
+    const s = event.event_summary.toLowerCase();
+    if (s.includes("ransacked") || s.includes("crime"))
+      return <FaExclamationTriangle />;
+    if (s.includes("entry")) return <FaDoorOpen />;
+    if (s.includes("clear")) return <FaCheckCircle />;
+    return <FaUserShield />;
+  };
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    const onTime = () => setCurrentTime(audio.currentTime);
+    const onMeta = () => setDuration(audio.duration);
+    const onPlay = () => setIsPlaying(true);
+    const onPause = () => setIsPlaying(false);
+
+    audio.addEventListener("timeupdate", onTime);
+    audio.addEventListener("loadedmetadata", onMeta);
+    audio.addEventListener("play", onPlay);
+    audio.addEventListener("pause", onPause);
+
+    return () => {
+      audio.removeEventListener("timeupdate", onTime);
+      audio.removeEventListener("loadedmetadata", onMeta);
+      audio.removeEventListener("play", onPlay);
+      audio.removeEventListener("pause", onPause);
+    };
+  }, [audioSrc]);
+
+  useEffect(() => {
+    if (!visualPanelRef.current) return;
+    const containerRect = visualPanelRef.current.getBoundingClientRect();
+    const coords = {};
+
+    significantRoomEvents.forEach((e) => {
+      const el = document.getElementById(e.location);
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      coords[e.location] = {
+        x: r.left + r.width / 2 - containerRect.left,
+        y: r.top + r.height / 2 - containerRect.top,
+      };
+    });
+
+    setRoomCoords(coords);
+  }, [significantRoomEvents, floorplanSvg]);
+
+  return (
+    <div className="App">
+      <audio ref={audioRef} src={audioSrc} />
+
+      {}
+    </div>
+  );
 }
 
 export default App;
